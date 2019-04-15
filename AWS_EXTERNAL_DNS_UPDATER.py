@@ -8,13 +8,18 @@ import dns.resolver
 import json
 import logging
 import re
-import threading
+from threading import RLock, Thread
 import time
 import datetime
+import math
 
 logger = logging.getLogger("__main__")
 logger.setLevel(logging.DEBUG)
 logging.basicConfig(format=str(datetime.datetime.now()) + ' - %(message)s')
+global podsInProcess
+podsInProcess = []
+global lock
+lock = RLock()
 
 class Updater():
     kube = ""
@@ -28,6 +33,8 @@ class Updater():
     node_selector = ""
     label_selector = ""
     iterationDelay = ""
+    maxPodInfoRetries = 0
+
 
     def __init__(self):
         # Initialize Kube client
@@ -46,9 +53,13 @@ class Updater():
         self.node_selector = os.environ['NODE_SELECTOR']
         self.label_selector = "app=" + self.app
         if "MONITOR_DELAY" in os.environ:
-            self.iterationDelay = os.environ["MONITOR_DELAY"]
+            self.iterationDelay = int(os.environ["MONITOR_DELAY"])
         else:
-            self.iterationDelay = 1
+            self.iterationDelay = 10
+        if "MAX_PODINFO_RETRIES" in os.environ:
+            self.maxPodInfoRetries = int(os.environ["MAX_PODINFO_RETRIES"])
+        else:
+            self.maxPodInfoRetries = 5
 
     """
     Check if the public ip of a node matches the ip arg
@@ -61,45 +72,47 @@ class Updater():
           # Get the external node address
           for addr in n.status.addresses:
             if addr.type == 'ExternalIP':
-              return addr.address         
+              return addr.address
 
     def getPodsByLabel(self):
         res = self.kube.list_namespaced_pod(namespace=self.namespace, label_selector=self.label_selector)
         return res.items
-        
+
     """
     Iterates a list of pods and updates their DNS records to match their current state
     """
-    def updatePodDNS(self, pods):
-        for pod in pods:
-          fqdn = pod.metadata.name + '.' + self.zoneName
-          ip = self.lookupDNS(fqdn)
-          node = str(pod.spec.node_name)
-          nodeIP = self.getNodeIP(node)
-          # Check and update the host A record if necessary
-          if nodeIP == ip:
-            logger.debug("Node IP " + nodeIP + " matches pod IP for " + pod.metadata.name)
-          else:
-            # Update the A record for the pod then update the service record
-            logger.debug("Node IP does not match external DNS record for pod: Pod IP = " + ip + " Node IP = " + nodeIP)
-            try:
-              logger.debug("Trying to update pod DNS")
-              hostDNS = self.updateHostRecord(nodeIP, pod.metadata.name, 'UPSERT')
-            except Exception as e:
-              logger.debug("Updating pod " + pod.metadata.name + " Host DNS failed")
-              logger.debug(e)
-            # Update the pod record for the service            
-          
-          # Check the service record and update if necessary
-          records = self.aws.list_resource_record_sets( HostedZoneId=self.zoneId, StartRecordName=self.serviceName, StartRecordType='A')
-          for record in records["ResourceRecordSets"]:
-            if record["Name"].rstrip('.') == self.serviceName and "SetIdentifier" in record and record["SetIdentifier"] == pod.metadata.name:
-              if record["ResourceRecords"][0]["Value"] != nodeIP:
+    def updatePodDNS(self):
+        for pod in self.getPodsByLabel():
+            if not self.lockIt(pod.metadata.name):
+                continue
+            fqdn = pod.metadata.name + '.' + self.zoneName
+            ip = self.lookupDNS(fqdn)
+            node = str(pod.spec.node_name)
+            nodeIP = self.getNodeIP(node)
+            # Check and update the host A record if necessary
+            if nodeIP == ip:
+                logger.debug("Node IP " + nodeIP + " matches pod IP for " + pod.metadata.name)
+            else:
+                # Update the A record for the pod then update the service record
+                logger.debug("Node IP does not match external DNS record for pod: Pod IP = " + ip + " Node IP = " + nodeIP)
                 try:
-                  serviceDNS = self.updateServiceRecord(nodeIP, pod.metadata.name, 'UPSERT')
+                    logger.debug("Trying to update pod DNS")
+                    hostDNS = self.updateHostRecord(nodeIP, pod.metadata.name, 'UPSERT')
                 except Exception as e:
-                  logger.debug("Updating pod " + pod.metadata.name + " Service DNS failed.")
-                  logger.debug(e)
+                    logger.debug("Updating pod " + pod.metadata.name + " Host DNS failed")
+                    logger.debug(e)
+            # Check the service record and update if necessary
+            records = self.aws.list_resource_record_sets(HostedZoneId=self.zoneId, StartRecordName=self.serviceName, StartRecordType='A')
+            for record in records["ResourceRecordSets"]:
+                if record["Name"].rstrip('.') == self.serviceName and "SetIdentifier" in record and record["SetIdentifier"] == pod.metadata.name:
+                    if record["ResourceRecords"][0]["Value"] != nodeIP:
+                        try:
+                            serviceDNS = self.updateServiceRecord(nodeIP, pod.metadata.name, 'UPSERT')
+                        except Exception as e:
+                            logger.debug("Updating pod " + pod.metadata.name + " Service DNS failed.")
+                            logger.debug(e)
+
+            self.unlockIt(pod.metadata.name)
 
     """
     Gets pod's public address from its node and returns the pod name and IP
@@ -107,11 +120,11 @@ class Updater():
     def getPodInfo(self, pod):
         podHostname = pod.metadata.name
         try:
-          nodeName = pod.spec.node_name
+            nodeName = pod.spec.node_name
         except Exception as e:
-          logger.debug(pod.spec)
-          logger.debug(e)
-          return False
+            logger.debug(pod.spec)
+            logger.debug(e)
+            return False
 
         try:
             node = self.kube.read_node_status(nodeName)
@@ -181,7 +194,7 @@ class Updater():
 
         if action == 'DELETE' and self.lookupDNS(fqdn) == False:
           logger.debug("[ DELETE HOST RECORD ] Host record for " + fqdn + " does not exist and cannot be deleted")
-   
+
         if self.lookupDNS(fqdn) == addr and action != 'DELETE':
           logger.debug("[ UPSERT HOST RECORD] DNS record for host " + fqdn + " already set to " + addr)
           return True
@@ -203,7 +216,7 @@ class Updater():
     def updateServiceRecord(self, addr, host, action):
         logger.debug(addr + ' ' + host)
         if action == 'DELETE':
-            batch = {               
+            batch = {
                'Changes': [{
                     'Action': action,
                     'ResourceRecordSet': {
@@ -246,22 +259,99 @@ class Updater():
             logger.debug(e)
             return False
 
+    """
+    Process a pod ADD/DELETE/MODIFY event
+    """
+    def processPodEvent(self, pod):
+        for i in range(self.maxPodInfoRetries):
+            podinfo = self.getPodInfo(pod["object"])
+            if not podinfo:  # Pod is probably just not ready yet. Wait a while
+                time.sleep(2)
+            else:
+                break
+        if not podinfo: # We have hit our max number of tries and will give up
+            self.unlockIt(pod["object"].metadata.name)
+            return False        
+        logger.debug("[ WATCH ] Pod " + str(podinfo["host"]) + " " + str(pod["type"]))
+        if pod["type"] in ['ADDED', 'MODIFIED']:
+          action = 'UPSERT'
+        elif pod["type"] == 'DELETED':
+          action = 'DELETE'
+        else:
+            action = 'UPSERT'
+        try:
+            self.updateHostRecord(podinfo['address'], podinfo['host'], action)
+        except:
+            pass
+        try:
+            self.updateServiceRecord(podinfo['address'], podinfo['host'], action)
+        except:
+            pass
+        self.unlockIt(pod["object"].metadata.name)
+
+    """
+    Get a lock on the list of pods currently being processed and add our pod
+    """
+    def lockIt(self, pod):
+        test = lock.acquire(False)
+        if test:
+            #logger.debug("Got a lock on " + pod)
+            if pod not in podsInProcess:
+                podsInProcess.append(pod)
+                try:
+                    lock.release()
+                except:
+                    pass
+                return True
+            else:
+                logger.debug("Pod " + pod + " is already being processed.")
+                return False
+        else:
+            try:
+                lock.release()
+            except:
+                pass
+            return False
+
+    """
+    Get a lock on the list of pods currently being processed and remove our pod
+    """
+    def unlockIt(self, pod):
+        test = lock.acquire(False)
+        if test:
+            #logger.debug("Got a lock on " + pod)
+            if pod in podsInProcess:               
+                podsInProcess.remove(pod)
+                try:
+                    lock.release()
+                except:
+                    pass
+                #logger.debug("Lock released")
+                return True
+            else:
+                try:
+                    lock.release()
+                except:
+                    pass
+                #logger.debug("Lock released")
+                return True
+        else:
+            try:
+                lock.release()
+            except:
+                pass
+            return True
 
     def watchPods(self):
-      logger.debug("Watching pods")
-      w = watch.Watch()
-      for item in w.stream(self.kube.list_namespaced_pod, namespace=self.namespace, label_selector=self.label_selector, timeout_seconds=0):
-        podinfo = self.getPodInfo(item["object"])
-        if podinfo == False: # Probably just hasn't been assigned to a node yet
-           continue
-        logger.debug("[ WATCH ] Pod " + str(podinfo["host"]) + " " + str(item["type"]))
-        if item["type"] in ['ADDED', 'MODIFIED']:
-          action = 'UPSERT'
-        elif item["type"] == 'DELETED':
-          action = 'DELETE'
-        self.updateHostRecord(podinfo['address'], podinfo['host'], action)
-        self.updateServiceRecord(podinfo['address'], podinfo['host'], action)
-          
+        logger.debug("Watching pods")
+        w = watch.Watch()
+        for item in w.stream(self.kube.list_namespaced_pod, namespace=self.namespace, label_selector=self.label_selector, timeout_seconds=0):
+            while item["object"].metadata.name in podsInProcess:
+                logger.debug("[ WATCH ] Waiting to acquire lock on " + item["object"].metadata.name)
+                time.sleep(1)
+            t = Thread(target=self.processPodEvent(item))
+            t.daemon = True
+            t.start()
 
     def checkZoneForOrphanServiceRecords(self):
         allRecords = self.aws.list_resource_record_sets( HostedZoneId=self.zoneId, StartRecordName=self.serviceName, StartRecordType='A')
@@ -269,22 +359,23 @@ class Updater():
         # Filter down to only the records that are part of the service
         for record in allRecords["ResourceRecordSets"]:
             if record["Name"].rstrip('.') == self.serviceName and "SetIdentifier" in record:
-               newRecord = { 
-                            "pod": record["SetIdentifier"], 
+               newRecord = {
+                            "pod": record["SetIdentifier"],
                             "ip": record["ResourceRecords"][0]["Value"]
                            }
                records.append(newRecord)
         pods = []
-        # Get a list of current pod names        
+        # Get a list of current pod names
         for pod in self.getPodsByLabel():
             podinfo = self.getPodInfo(pod)
-            pods.append(podinfo["host"])
-
+            if podinfo:
+                pods.append(podinfo["host"])
         # Check if the record actually has an existing pod that matches its SetIdentifier
         for record in records:
-            if record["pod"] not in pods:
+            if record["pod"] not in pods and record["pod"] and self.lockIt(record["pod"]) != False:
                 logger.debug("[ CHECK FOR ORPHAN SERVICE RECORD] A service record for pod " + record["pod"] + " exists but the pod does not. Attempting to remove.")
-                self.updateServiceRecord(record["ip"], record["pod"], 'DELETE')          
+                self.updateServiceRecord(record["ip"], record["pod"], 'DELETE')
+                unlockIt(record["pod"])
 
     def checkZoneForOrphanHostRecords(self):
         allRecords = self.aws.list_resource_record_sets( HostedZoneId=self.zoneId, StartRecordName=self.serviceName, StartRecordType='A')
@@ -297,39 +388,90 @@ class Updater():
         # Get a list of current pod names
         for pod in self.getPodsByLabel():
             podinfo = self.getPodInfo(pod)
-            pods.append(podinfo["host"])
-
+            if podinfo:
+                pods.append(podinfo["host"])
         for record in records:
-            if record["name"] not in pods:
-                self.updateHostRecord(record["ip"], record["name"], 'DELETE') 
+            if record["name"] not in pods and record["name"] and self.lockIt(record["name"]) != False:
+                self.updateHostRecord(record["ip"], record["name"], 'DELETE')
+                self.unlockIt(record["name"])
 
-    def monitorDNS(self):
+    """
+    Return a thread of watchPods method that watches for pod events via the kube API
+    """
+    def runWatchPods(self):
+        t = Thread(name="watchPods", target=self.watchPods)
+        t.daemon = True
+        t.start()
+        return t
+
+    """
+    Check for orphaned records in a loop
+    """
+    def monitorForOrphanRecords(self):
         while True:
+            logger.debug("Checking for orphaned records")
             self.checkZoneForOrphanHostRecords()
             self.checkZoneForOrphanServiceRecords()
             time.sleep(self.iterationDelay)
 
-    def runWatchPods(self):
-        watchPods = threading.Thread(name="watchPods", target=self.watchPods)
-        watchPods.daemon = True
-        watchPods.start()
-        return watchPods
+    """
+    Return a thread that watches for orphaned records in a loop
+    """
+    def runMonitorForOrphanRecords(self):
+        t = Thread(name="monitorForOrphanRecords", target=self.monitorForOrphanRecords)
+        t.daemon = True
+        t.start()
+        return t
 
-    def runMonitorRecords(self):
-        monitorRecords = threading.Thread(name="monitorRecords", target=self.monitorDNS)
-        monitorRecords.daemon = True
-        monitorRecords.start()
-        return monitorRecords
+    """
+    Loops and monitors pods looking for pods that somehow didn't get their records created/updated
+    """
+    def monitorForMissingRecords(self):
+        while True:
+            logger.debug("Checking for missing records")
+            self.updatePodDNS()
+            time.sleep(self.iterationDelay)
+
+    """
+    Return a thread that monitors for pod records that should exist but don't
+    """
+    def runMonitorForMissingRecords(self):
+        t = Thread(name="monitorForMissingRecords", target=self.monitorForMissingRecords)
+        t.daemon = True
+        t.start()
+        return t
+
 
     def runAll(self):
-        pods = self.runMonitorRecords()
-        records = self.runWatchPods()
+        pp("#################################################################################################################")
+        pp("Starting DNS service with the following options:")
+        pp("    Domain = " + self.domain)
+        pp("    DNS Zone Name = " + self.zoneName)
+        pp("    AWS Zone ID = " + self.zoneId) 
+        pp("    Service Name = " + self.serviceName)
+        pp("    Pod Namespace = " + self.namespace)
+        pp("    TTL for records = " + str(self.ttl))
+        pp("    App Name = " + self.app)
+        pp("    Node Selector = " + self.node_selector)
+        pp("    Pod label selector = " + self.label_selector)
+        pp("    Iteration delay = " + str(self.iterationDelay))
+        pp("    Max retries for getting pod info = " + str(self.maxPodInfoRetries))
+        pp("#################################################################################################################")
+
+        watchPods = self.runWatchPods()
+        time.sleep(math.floor(self.iterationDelay / 2))
+        orphans = self.runMonitorForOrphanRecords()
+        time.sleep(math.floor(self.iterationDelay / 2))
+        missing = self.runMonitorForMissingRecords()
+
         while True:
-            if not pods.isAlive():
+            if not watchPods.isAlive():
                 logger.debug("Thread 'watchPods' has died")
                 raise SystemExit(1)
-            if not records.isAlive():
-                logger.debug("Thread 'monitorRecords' has died")
+            if not orphans.isAlive():
+                logger.debug("Thread 'watchForOrphans' has died")
+                raise SystemExit(1)
+            if not missing.isAlive():
+                logger.debug("Thread 'watchForMissing' has died")
                 raise SystemExit(1)
             time.sleep(1)
-
