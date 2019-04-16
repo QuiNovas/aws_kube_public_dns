@@ -94,7 +94,10 @@ class Updater():
                 logger.debug("Node IP " + nodeIP + " matches pod IP for " + pod.metadata.name)
             else:
                 # Update the A record for the pod then update the service record
-                logger.debug("Node IP does not match external DNS record for pod: Pod IP = " + ip + " Node IP = " + nodeIP)
+                if not ip or not nodeIP:
+                    logger.debug("Node IP does not match external DNS record for pod: Pod IP = " + fqdn)
+                else:
+                    logger.debug("Node IP does not match external DNS record for pod: Pod IP = " + ip + " Node IP = " + nodeIP)
                 try:
                     logger.debug("Trying to update pod DNS")
                     hostDNS = self.updateHostRecord(nodeIP, pod.metadata.name, 'UPSERT')
@@ -102,7 +105,12 @@ class Updater():
                     logger.debug("Updating pod " + pod.metadata.name + " Host DNS failed")
                     logger.debug(e)
             # Check the service record and update if necessary
-            records = self.aws.list_resource_record_sets(HostedZoneId=self.zoneId, StartRecordName=self.serviceName, StartRecordType='A')
+            try:
+                records = self.aws.list_resource_record_sets(HostedZoneId=self.zoneId, StartRecordName=self.serviceName, StartRecordType='A')
+            except Exception as e:
+                logger.debug("[ UPDATE POD DNS ] " + e)
+                self.unlockIt(pod.metadata.name)
+                continue
             for record in records["ResourceRecordSets"]:
                 if record["Name"].rstrip('.') == self.serviceName and "SetIdentifier" in record and record["SetIdentifier"] == pod.metadata.name:
                     if record["ResourceRecords"][0]["Value"] != nodeIP:
@@ -200,6 +208,7 @@ class Updater():
           return True
         try:
             res = self.aws.change_resource_record_sets(HostedZoneId=self.zoneId, ChangeBatch=batch)
+            # TODO: Check response for status and don't return until the operation has finished
             if action == 'Delete':
                 logger.debug("[" +  action + " ] HOST RECORD Record for " + host + " has been deleted")
             else:
@@ -250,6 +259,7 @@ class Updater():
         try:
             res = self.aws.change_resource_record_sets(HostedZoneId=self.zoneId, ChangeBatch=batch)
             logger.debug("[ "  + action + " SERVICE RECORD ] Service record for " + host + " was updated")
+            # TODO: Check response for status and don't return until the operation has finished
             return res
         except Exception as e:
             if action == 'DELETE':
@@ -271,7 +281,7 @@ class Updater():
                 break
         if not podinfo: # We have hit our max number of tries and will give up
             self.unlockIt(pod["object"].metadata.name)
-            return False        
+            return False
         logger.debug("[ WATCH ] Pod " + str(podinfo["host"]) + " " + str(pod["type"]))
         if pod["type"] in ['ADDED', 'MODIFIED']:
           action = 'UPSERT'
@@ -320,7 +330,7 @@ class Updater():
         test = lock.acquire(False)
         if test:
             #logger.debug("Got a lock on " + pod)
-            if pod in podsInProcess:               
+            if pod in podsInProcess:
                 podsInProcess.remove(pod)
                 try:
                     lock.release()
@@ -441,13 +451,12 @@ class Updater():
         t.start()
         return t
 
-
-    def runAll(self):
+    def banner(self):
         pp("#################################################################################################################")
         pp("Starting DNS service with the following options:")
         pp("    Domain = " + self.domain)
         pp("    DNS Zone Name = " + self.zoneName)
-        pp("    AWS Zone ID = " + self.zoneId) 
+        pp("    AWS Zone ID = " + self.zoneId)
         pp("    Service Name = " + self.serviceName)
         pp("    Pod Namespace = " + self.namespace)
         pp("    TTL for records = " + str(self.ttl))
@@ -458,6 +467,9 @@ class Updater():
         pp("    Max retries for getting pod info = " + str(self.maxPodInfoRetries))
         pp("#################################################################################################################")
 
+    def runAll(self):
+        self.banner()
+        time.sleep(2)
         watchPods = self.runWatchPods()
         time.sleep(math.floor(self.iterationDelay / 2))
         orphans = self.runMonitorForOrphanRecords()
