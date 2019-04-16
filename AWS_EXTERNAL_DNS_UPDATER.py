@@ -133,7 +133,7 @@ class Updater():
             nodeName = pod.spec.node_name
             if not nodeName:
                 logger.debug("[ Get Pod INFO ] Pod " + podHostname + " not assigned to a node yet.")
-                return false
+                return False
         except Exception as e:
             logger.debug(pod.spec)
             logger.debug(e)
