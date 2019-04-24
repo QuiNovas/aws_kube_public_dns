@@ -65,18 +65,28 @@ class Updater():
     Check if the public ip of a node matches the ip arg
     """
     def getNodeIP(self, node):
-      nodes = self.kube.list_node(label_selector=self.node_selector)
-      for n in nodes.items:
-        name = n.metadata.name
-        if name == node:
-          # Get the external node address
-          for addr in n.status.addresses:
-            if addr.type == 'ExternalIP':
-              return addr.address
+        try:
+            nodes = self.kube.list_node(label_selector=self.node_selector)
+        except Exception as e:
+            logger.debug("[ getNodeIP ] Could not get list of nodes:")
+            logger.debug(e)
+            return False
+        for n in nodes.items:
+            name = n.metadata.name
+            if name == node:
+                # Get the external node address
+                for addr in n.status.addresses:
+                    if addr.type == 'ExternalIP':
+                        return addr.address
 
     def getPodsByLabel(self):
-        res = self.kube.list_namespaced_pod(namespace=self.namespace, label_selector=self.label_selector)
-        return res.items
+        try:
+            res = self.kube.list_namespaced_pod(namespace=self.namespace, label_selector=self.label_selector)
+            return res.items
+        except Exception as e:
+            logger.debug("[ getPodsByLabel ] Could not list namespaced pods: ")
+            logger.debug(e)
+            return []
 
     """
     Iterates a list of pods and updates their DNS records to match their current state
@@ -296,12 +306,14 @@ class Updater():
             action = 'UPSERT'
         try:
             self.updateHostRecord(podinfo['address'], podinfo['host'], action)
-        except:
-            pass
+        except Exception as e:
+            logger.debug("[ updateHostRecord ] Could not update record: ")
+            logger.debug(e)
         try:
             self.updateServiceRecord(podinfo['address'], podinfo['host'], action)
-        except:
-            pass
+        except Exception as e:
+            logger.debug("[ updateServiceRecord ] Could not update record: ")
+            logger.debug(e)
         self.unlockIt(pod["object"].metadata.name)
 
     """
@@ -390,7 +402,7 @@ class Updater():
             if record["pod"] not in pods and record["pod"] and self.lockIt(record["pod"]) != False:
                 logger.debug("[ CHECK FOR ORPHAN SERVICE RECORD] A service record for pod " + record["pod"] + " exists but the pod does not. Attempting to remove.")
                 self.updateServiceRecord(record["ip"], record["pod"], 'DELETE')
-                unlockIt(record["pod"])
+                self.unlockIt(record["pod"])
 
     def checkZoneForOrphanHostRecords(self):
         allRecords = self.aws.list_resource_record_sets( HostedZoneId=self.zoneId, StartRecordName=self.serviceName, StartRecordType='A')
