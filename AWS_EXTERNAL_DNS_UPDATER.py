@@ -480,7 +480,7 @@ class Updater():
     def banner(self):
         string = """
         #################################################################################################################
-            Starting DNS service with the following options:\n
+            Starting DNS service with the following options:
                 Domain = {domain}
                 DNS Zone Name = {zonename}
                 AWS Zone ID = {zoneid}
