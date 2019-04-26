@@ -39,6 +39,8 @@ class Updater():
     def __init__(self):
         # Initialize Kube client
         config.load_incluster_config()
+        if "DEBUG" in os.environ:
+            config.debug = True
         self.kube = client.CoreV1Api()
         # Route53
         self.aws = boto3.client('route53')
@@ -156,6 +158,9 @@ class Updater():
             return False
         for i in node.status.addresses:
             if i.type == 'ExternalIP':
+                if not i.address:
+                    logger.debug("[ getPodInfo ] Could not get external address for pod on host " + nodeName)
+                    return False
                 return {"address": i.address, "host": podHostname, "nodeName": nodeName}
 
     """
@@ -372,13 +377,17 @@ class Updater():
     def watchPods(self):
         logger.debug("Watching pods")
         w = watch.Watch()
-        for item in w.stream(self.kube.list_namespaced_pod, namespace=self.namespace, label_selector=self.label_selector, timeout_seconds=0):
-            while item["object"].metadata.name in podsInProcess:
-                logger.debug("[ WATCH ] Waiting to acquire lock on " + item["object"].metadata.name)
-                time.sleep(1)
-            t = Thread(target=self.processPodEvent(item))
-            t.daemon = True
-            t.start()
+        try:
+            for item in w.stream(self.kube.list_namespaced_pod, namespace=self.namespace, label_selector=self.label_selector, timeout_seconds=0):
+                while item["object"].metadata.name in podsInProcess:
+                    logger.debug("[ WATCH ] Waiting to acquire lock on " + item["object"].metadata.name)
+                    time.sleep(1)
+                t = Thread(target=self.processPodEvent(item))
+                t.daemon = True
+                t.start()
+        except Exception as e:
+            logger.debug("[ watchPods ] ERROR:")
+            logger.debug(e)
 
     def checkZoneForOrphanServiceRecords(self):
         allRecords = self.aws.list_resource_record_sets( HostedZoneId=self.zoneId, StartRecordName=self.serviceName, StartRecordType='A')
@@ -469,20 +478,35 @@ class Updater():
         return t
 
     def banner(self):
-        pp("#################################################################################################################")
-        pp("Starting DNS service with the following options:")
-        pp("    Domain = " + self.domain)
-        pp("    DNS Zone Name = " + self.zoneName)
-        pp("    AWS Zone ID = " + self.zoneId)
-        pp("    Service Name = " + self.serviceName)
-        pp("    Pod Namespace = " + self.namespace)
-        pp("    TTL for records = " + str(self.ttl))
-        pp("    App Name = " + self.app)
-        pp("    Node Selector = " + self.node_selector)
-        pp("    Pod label selector = " + self.label_selector)
-        pp("    Iteration delay = " + str(self.iterationDelay))
-        pp("    Max retries for getting pod info = " + str(self.maxPodInfoRetries))
-        pp("#################################################################################################################")
+        string = """
+        #################################################################################################################
+            Starting DNS service with the following options:\n
+                Domain = {domain}
+                DNS Zone Name = {zonename}
+                AWS Zone ID = {zoneid}
+                Service Name = {service}
+                Pod Namespace = {namespace}
+                TTL for records = {ttl}
+                App Name = {app}
+                Node Selector = {node}
+                Pod label selector = {label}
+                Iteration delay = {delay}
+                Max retries for getting pod info = {retries}
+        #################################################################################################################
+        """.format(
+                domain=self.domain,
+                zonename=self.zoneName,
+                zoneid=self.zoneId,
+                service=self.serviceName,
+                namespace=self.namespace,
+                ttl=str(self.ttl),
+                app=self.app,
+                node=self.nodeSelector,
+                label=self.labelSelector,
+                delay=str(self.iterationDelay),
+                retries=str(self.maxPodInfoRetries)
+            )
+        print(string)
 
     def runAll(self):
         self.banner()
@@ -496,7 +520,8 @@ class Updater():
         while True:
             if not watchPods.isAlive():
                 logger.debug("Thread 'watchPods' has died")
-                raise SystemExit(1)
+                logger.debug("Restarting Watch().stream()")
+                watchPods = self.runWatchPods()
             if not orphans.isAlive():
                 logger.debug("Thread 'watchForOrphans' has died")
                 raise SystemExit(1)
