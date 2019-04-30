@@ -379,12 +379,15 @@ class Updater():
         w = watch.Watch()
         try:
             for item in w.stream(self.kube.list_namespaced_pod, namespace=self.namespace, label_selector=self.label_selector, timeout_seconds=0):
-                while item["object"].metadata.name in podsInProcess:
-                    logger.debug("[ WATCH ] Waiting to acquire lock on " + item["object"].metadata.name)
-                    time.sleep(1)
-                t = Thread(target=self.processPodEvent(item))
-                t.daemon = True
-                t.start()
+                for i in range(self.maxPodInfoRetries):
+                    if lockIt(item["object"].metadata.name):
+                        t = Thread(target=self.processPodEvent(item))
+                        t.daemon = True
+                        t.start()
+                        break
+                    else:
+                        logger.debug("[ WATCH ] Waiting to acquire lock on " + item["object"].metadata.name + " for " + str(item["type"]) + " operation")
+                        time.sleep(1)
         except Exception as e:
             logger.debug("[ watchPods ] ERROR:")
             logger.debug(e)
@@ -501,8 +504,8 @@ class Updater():
                 namespace=self.namespace,
                 ttl=str(self.ttl),
                 app=self.app,
-                node=self.nodeSelector,
-                label=self.labelSelector,
+                node=self.node_selector,
+                label=self.label_selector,
                 delay=str(self.iterationDelay),
                 retries=str(self.maxPodInfoRetries)
             )
