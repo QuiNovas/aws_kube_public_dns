@@ -511,7 +511,7 @@ class Updater():
         try:
             for item in w.stream(self.kube.list_namespaced_pod, namespace=self.namespace, label_selector=self.label_selector, timeout_seconds=0):
                 for i in range(self.maxPodInfoRetries):
-                    if lockIt(item["object"].metadata.name):
+                    if self.lockIt(item["object"].metadata.name):
                         t = Thread(target=self.processPodEvent(item))
                         t.daemon = True
                         t.start()
