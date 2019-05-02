@@ -511,7 +511,7 @@ class Updater():
         try:
             for item in w.stream(self.kube.list_namespaced_pod, namespace=self.namespace, label_selector=self.label_selector, timeout_seconds=0):
                 for i in range(self.maxPodInfoRetries):
-                    logger.debug("[ WATCH ] Acquiring lock try " + i + " of " + self.maxPodInfoRetries)
+                    logger.debug("[ WATCH ] Acquiring lock try " + str(i) + " of " + str(self.maxPodInfoRetries))
                     if self.lockIt(item["object"].metadata.name):
                         t = Thread(target=self.processPodEvent(item))
                         t.daemon = True
