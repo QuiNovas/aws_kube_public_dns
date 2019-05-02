@@ -400,13 +400,16 @@ class Updater():
                 none
         """
         # TODO: return something
-
         for i in range(self.maxPodInfoRetries):
             podinfo = self.getPodInfo(pod["object"])
-            if not podinfo:  # Pod is probably just not ready yet. Wait a while
-                time.sleep(2)
-            else:
+            if podinfo:
                 break
+            if not podinfo and i == (self.maxPodInfoRetries - 1):  # Pod is probably just not ready yet. Wait a while
+                logger.debug("[ PROCESS POD EVENT ] Ran out of retries waiting for pod " + pod["object"].metadata.name + " to enter READY state." )
+                break
+            else:
+                logger.debug("[ PROCESS POD EVENT ] Waiting for pod to become ready")
+                time.sleep(2)
         if not podinfo: # We have hit our max number of tries and will give up
             self.unlockIt(pod["object"].metadata.name)
             return False
