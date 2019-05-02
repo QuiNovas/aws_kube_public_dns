@@ -517,7 +517,7 @@ class Updater():
                         t.start()
                         break
                     else:
-                        if n i == self.maxPodInfoRetries:
+                        if i == self.maxPodInfoRetries:
                             logger.debug("[ WATCH ] Ran out of retries to acquire lock on " + item["object"].metadata.name + " for " + str(item["type"]) + " operation")
                         else:
                             logger.debug("[ WATCH ] Waiting to acquire lock on " + item["object"].metadata.name + " for " + str(item["type"]) + " operation")
