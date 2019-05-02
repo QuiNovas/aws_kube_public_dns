@@ -93,7 +93,7 @@ class Updater():
         config.load_incluster_config()
 
         # Turns on DEBUG for the Kube library
-        if "DEBUG" in os.environ:
+        if "DEBUG" in os.environ and os.environ["DEBUG"]:
             config.debug = True
 
         self.kube = client.CoreV1Api()
