@@ -517,8 +517,11 @@ class Updater():
                         t.start()
                         break
                     else:
-                        logger.debug("[ WATCH ] Waiting to acquire lock on " + item["object"].metadata.name + " for " + str(item["type"]) + " operation")
-                        time.sleep(1)
+                        if n i == self.maxPodInfoRetries:
+                            logger.debug("[ WATCH ] Ran out of retries to acquire lock on " + item["object"].metadata.name + " for " + str(item["type"]) + " operation")
+                        else:
+                            logger.debug("[ WATCH ] Waiting to acquire lock on " + item["object"].metadata.name + " for " + str(item["type"]) + " operation")
+                            time.sleep(1)
         except Exception as e:
             logger.debug("[ watchPods ] ERROR:")
             logger.debug(e)
