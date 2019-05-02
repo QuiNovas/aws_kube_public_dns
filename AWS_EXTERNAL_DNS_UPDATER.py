@@ -86,7 +86,7 @@ class Updater():
     label_selector = ""
     iterationDelay = ""
     maxPodInfoRetries = 0
-
+    lockedBy = ""
 
     def __init__(self):
         # Initialize Kube client. Config and credentials are expected to be provided via the pod itself and uses RBAC
@@ -511,13 +511,14 @@ class Updater():
         try:
             for item in w.stream(self.kube.list_namespaced_pod, namespace=self.namespace, label_selector=self.label_selector, timeout_seconds=0):
                 for i in range(self.maxPodInfoRetries):
+                    logger.debug("[ WATCH ] Acquiring lock try " + i + " of " + self.maxPodInfoRetries)
                     if self.lockIt(item["object"].metadata.name):
                         t = Thread(target=self.processPodEvent(item))
                         t.daemon = True
                         t.start()
                         break
                     else:
-                        if i == self.maxPodInfoRetries:
+                        if i == (self.maxPodInfoRetries - 1):
                             logger.debug("[ WATCH ] Ran out of retries to acquire lock on " + item["object"].metadata.name + " for " + str(item["type"]) + " operation")
                         else:
                             logger.debug("[ WATCH ] Waiting to acquire lock on " + item["object"].metadata.name + " for " + str(item["type"]) + " operation")
