@@ -198,6 +198,7 @@ class Updater():
                 except Exception as e:
                     logger.debug("Updating pod " + pod.metadata.name + " Host DNS failed")
                     logger.debug(e)
+            self.unlockIt(pod.metadata.name)
 
                 # Check the service record and update if necessary
         for pod in self.getPodsByLabel():
@@ -521,7 +522,7 @@ class Updater():
         try:
             for item in w.stream(self.kube.list_namespaced_pod, namespace=self.namespace, label_selector=self.label_selector, timeout_seconds=0):
                 for i in range(self.maxPodInfoRetries):
-                    logger.debug("[ WATCH ] Acquiring lock try " + str(i) + " of " + str(self.maxPodInfoRetries))
+                    logger.debug("[ WATCH ] Acquiring lock try " + str(i + 1) + " of " + str(self.maxPodInfoRetries))
                     if self.lockIt(item["object"].metadata.name):
                         t = Thread(target=self.processPodEvent(item))
                         t.daemon = True
