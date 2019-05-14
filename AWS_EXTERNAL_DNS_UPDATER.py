@@ -200,21 +200,28 @@ class Updater():
                     logger.debug(e)
 
                 # Check the service record and update if necessary
-                try:
-                    records = self.aws.list_resource_record_sets(HostedZoneId=self.zoneId, StartRecordName=self.serviceName, StartRecordType='A')
-                except Exception as e:
-                    logger.debug("[ UPDATE POD DNS ] ")
-                    logger.debug(e)
-                    self.unlockIt(pod.metadata.name)
-                    continue
-                for record in records["ResourceRecordSets"]:
-                    if record["Name"].rstrip('.') == self.serviceName and "SetIdentifier" in record and record["SetIdentifier"] == pod.metadata.name:
-                        if record["ResourceRecords"][0]["Value"] != nodeIP:
-                            try:
-                                serviceDNS = self.updateServiceRecord(nodeIP, pod.metadata.name, 'UPSERT')
-                            except Exception as e:
-                                logger.debug("Updating pod " + pod.metadata.name + " Service DNS failed.")
-                                logger.debug(e)
+        for pod in self.getPodsByLabel():
+            if not self.lockIt(pod.metadata.name):
+                continue
+            fqdn = pod.metadata.name + '.' + self.zoneName
+            ip = self.lookupDNS(fqdn)
+            node = str(pod.spec.node_name)
+            nodeIP = self.getNodeIP(node)
+            try:
+                records = self.aws.list_resource_record_sets(HostedZoneId=self.zoneId, StartRecordName=self.serviceName, StartRecordType='A')
+            except Exception as e:
+                logger.debug("[ UPDATE POD DNS ] ")
+                logger.debug(e)
+                self.unlockIt(pod.metadata.name)
+                continue
+            for record in records["ResourceRecordSets"]:
+                if record["Name"].rstrip('.') == self.serviceName and "SetIdentifier" in record and record["SetIdentifier"] == pod.metadata.name:
+                    if record["ResourceRecords"][0]["Value"] != nodeIP:
+                        try:
+                            serviceDNS = self.updateServiceRecord(nodeIP, pod.metadata.name, 'UPSERT')
+                        except Exception as e:
+                            logger.debug("Updating pod " + pod.metadata.name + " Service DNS failed.")
+                            logger.debug(e)
 
             self.unlockIt(pod.metadata.name)
 
