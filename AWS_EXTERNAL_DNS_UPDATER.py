@@ -484,27 +484,16 @@ class Updater():
 
         """
 
-        if lock.acquire(False):
-            if pod in podsInProcess:
+        if pod in podsInProcess:
+            try:
                 podsInProcess.remove(pod)
-                try:
-                    lock.release()
-                except:
-                    pass
-                return True
-            else:
-                try:
-                    lock.release()
-                except:
-                    pass
-                return True
-        else:
+            except:
+                pass
             try:
                 lock.release()
             except:
                 pass
             return True
-
 
     def watchPods(self):
         """
